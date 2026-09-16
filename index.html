@@ -2853,8 +2853,9 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
     up = clamp(up + (opts.extraUp || 0) * sp, 0.3 * sp, Math.max(0.3 * sp, gapUp));
     down = clamp(down + (opts.extraDown || 0) * sp, 0.3 * sp, Math.max(0.3 * sp, gapDn));
     const region = { x0, x1, topCurve: A.top, botCurve: B.bottom, up, down, sp, masks: [maskUp, maskDn].filter(Boolean) };
-    // header band above the first staff of the system (rehearsal marks, tempo, chords)
-    if (opts.header && a > 0) {
+    // header band above the first staff of the system (rehearsal marks, tempo, chords);
+    // when the part itself starts with that staff, the band begins where the strip ends
+    if (opts.header) {
       const T0 = st[sys[0]];
       const prev = sys[0] > 0 ? st[sys[0] - 1] : null;
       let gapH = prev ? Math.min(...xs.map((x) => T0.top(x) - prev.bottom(x))) : Math.min(...xs.map((x) => T0.top(x)));
@@ -2890,6 +2891,17 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
       for (let v = Math.round(0.25 * sp); v < Math.min(prof.length, Math.round(0.9 * sp)); v++) {
         if (prof[v] <= 0.012) { hBottom = v; break; }
       }
+      let bandKinds = opts.headerKinds || null;
+      if (a === 0) {
+        if (!prev) {
+          // first system on the page: everything above the part's own top staff goes through the
+          // classifier, which keeps its notes, slurs, chords and marks and drops the title block
+          up = Math.min(up, hBottom);
+          region.up = up;
+          bandKinds = (bandKinds || HEADER_ALL).concat(['staff', 'lyric']);
+        }
+        hBottom = Math.max(hBottom, Math.round(up));
+      }
       const blocks = contentBlocks(prof, sp, hBottom, 0.8);
       let hTop = hBottom;
       // stacked header rows (tempo, segno, chord names, rehearsal marks ...) until a clear gap;
@@ -2901,7 +2913,7 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
       }
       hTop = Math.min(limit, hTop + Math.round(0.4 * sp) + (opts.extraHeader || 0) * sp);
       if (hTop - hBottom > 1.0 * sp) {
-        region.header = { curve: T0.top, from: hTop, to: hBottom, maskX, maskUp: maskUpPx, x0: hx0, startX: T0.xL, endX: T0.xR, kinds: opts.headerKinds || null, first: !prev };
+        region.header = { curve: T0.top, from: hTop, to: hBottom, maskX, maskUp: maskUpPx, x0: hx0, startX: T0.xL, endX: T0.xR, kinds: bandKinds, first: !prev };
       }
     }
     return region;
@@ -3089,6 +3101,9 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
       // touching the top staff line (or cut by the band's lower edge): part of that staff
       if (c.maxY >= bandH) c.kind = 'staff';
       else if (c.maxY < bandH * 0.55 && c.bw < 2.5 * sp && c.minX > w - cornerW && c.minX > endX + 0.5 * sp) c.kind = 'page';
+      // page number in the other corner, and bits of glyphs cut off by the top of the band
+      else if (c.maxY < bandH * 0.55 && c.bw < 2.5 * sp && c.maxX < cornerW && c.maxX < startX - 0.5 * sp && !isFrame(c, w, sp)) c.kind = 'page';
+      else if (c.minY <= 1 && c.bh < 0.8 * sp && c.bw < 1.2 * sp) c.kind = 'page';
     }
     // typical letter height (chord names are the most common header glyphs)
     const letterHs = comps.filter((c) => !c.kind && c.bh >= 0.6 * sp && c.bh <= 3 * sp && c.bw <= 2.5 * sp && c.bw <= 1.6 * c.bh && c.fill > 0.35).map((c) => c.bh).sort((a, b) => a - b);
@@ -3771,11 +3786,13 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
     title: '',
     outPart: 'active',
     sample: false,
+    adding: null, // id of the part whose next tapped staff is added to it
     busy: { total: 0, done: 0 },
     opening: 0,
   };
   function newPart(name) {
-    const p = { id: 'p' + uid++, name, kind: null, ref: null, sel: {}, opts: Object.assign({}, partDefaults, { chords: null }) };
+    // extra: other staves cut out together with the part (e.g. the vocal line for a singing guitarist)
+    const p = { id: 'p' + uid++, name, kind: null, ref: null, sel: {}, extra: [], withVocal: false, opts: Object.assign({}, partDefaults, { chords: null }) };
     state.parts.push(p);
     return p;
   }
@@ -3792,12 +3809,12 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
   }
   const partKind = (part) => part.kind || guessKind(part.name);
   const chordsOn = (part) => (part.opts.chords == null ? partKind(part) !== 'drums' : part.opts.chords);
-  function headerKinds(part) {
+  function headerKinds(part, vocalTop) {
     const o = part.opts;
     const kinds = [];
     if (o.header) kinds.push('box', 'tempo', 'sign', 'end');
     if (chordsOn(part)) kinds.push('chord');
-    if (partKind(part) === 'vocal' && kinds.length) kinds.push('text');
+    if ((partKind(part) === 'vocal' || vocalTop) && kinds.length) kinds.push('text');
     return kinds.length ? kinds : null;
   }
   state.activePart = newPart('ドラム').id;
@@ -3898,7 +3915,8 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
     state.pages = [];
     state.sample = false;
     state.title = '';
-    for (const part of state.parts) { part.ref = null; part.sel = {}; }
+    for (const part of state.parts) { part.ref = null; part.sel = {}; part.extra = []; }
+    state.adding = null;
     regionCache.clear();
   }
   function releasePage(p) {
@@ -4055,7 +4073,7 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
     return canvasBlob(o, 'image/jpeg', 0.88);
   }
   function afterProcessing() {
-    for (const part of state.parts) if (part.ref) propagate(part);
+    propagateAll();
     if (!state.sample && state.step === 'load') {
       const done = state.pages.filter((p) => p.status === 'done').length;
       const bad = state.pages.length - done;
@@ -4125,12 +4143,70 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
   const isChosen = (sel) => sel && (sel.mode === 'ref' || sel.mode === 'auto' || sel.mode === 'manual');
   const needsCheck = (sel) => sel && ((sel.mode === 'auto' || sel.mode === 'none') && sel.conf < 0.7);
 
+  // ---- extra staves of a part: each keeps its own reference and follows it through the score
+  const selectors = (part) => [part, ...(part.extra || []).filter((x) => x.ref)];
+  function propagateAll() {
+    for (const part of state.parts) {
+      if (part.ref) propagate(part);
+      for (const x of part.extra || []) if (x.ref) propagate(x);
+      part.extra = (part.extra || []).filter((x) => x.ref);
+      syncVocal(part);
+    }
+  }
+  function staffTaken(part, sys, idx) {
+    return selectors(part).some((q) => { const s = q.sel[sys.key]; return isChosen(s) && idx >= s.a && idx <= s.b; });
+  }
+  function addExtra(part, sys, idx, vocal) {
+    if (staffTaken(part, sys, idx)) return null;
+    const x = { id: 'x' + uid++, ref: null, sel: {}, opts: part.opts, vocal: !!vocal };
+    setReference(x, sys, idx);
+    if (!x.ref) return null;
+    part.extra.push(x);
+    return x;
+  }
+  function removeExtra(part, x) {
+    part.extra = part.extra.filter((q) => q !== x);
+  }
+  // "ボーカルの段も一緒に": the top staff of the reference system (where Japanese band scores print the vocal)
+  function syncVocal(part) {
+    const cur = (part.extra || []).find((x) => x.vocal);
+    const want = part.withVocal && part.ref && partKind(part) !== 'vocal' && part.ref.a > 0;
+    if (!want) { if (cur) removeExtra(part, cur); return; }
+    if (cur && cur.ref && cur.ref.key === part.ref.key && cur.ref.a === 0) return;
+    if (cur) removeExtra(part, cur);
+    const sys = docSystems().find((s) => s.key === part.ref.key);
+    if (sys) addExtra(part, sys, 0, true);
+  }
+  function refChanged(part) {
+    syncVocal(part);
+  }
+
   function tapStaff(part, sys, idx) {
-    if (!part.ref) { setReference(part, sys, idx); return; }
+    if (state.adding === part.id) {
+      state.adding = null;
+      if (!part.ref) { setReference(part, sys, idx); refChanged(part); return; }
+      if (!addExtra(part, sys, idx)) toast('その譜表はすでに選ばれています', 3000);
+      return;
+    }
+    if (!part.ref) { setReference(part, sys, idx); refChanged(part); return; }
+    // an added staff: tapping it leaves it out of this system (tap again to bring it back)
+    for (const x of part.extra || []) {
+      if (!x.ref) continue;
+      const cur = x.sel[sys.key];
+      if (isChosen(cur) && idx >= cur.a && idx <= cur.b) {
+        if (sys.key !== x.ref.key) x.sel[sys.key] = { mode: 'off', prev: cur };
+        return;
+      }
+      if (cur && cur.mode === 'off' && cur.prev && idx >= cur.prev.a && idx <= cur.prev.b) {
+        x.sel[sys.key] = cur.prev;
+        return;
+      }
+    }
     const cur = part.sel[sys.key];
     if (sys.key === part.ref.key) {
       if (idx >= part.ref.a && idx <= part.ref.b) return;
       setReference(part, sys, idx, true);
+      refChanged(part);
       return;
     }
     if (isChosen(cur) && idx >= cur.a && idx <= cur.b) {
@@ -4146,6 +4222,7 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
     let idx = (delta < 0 ? part.ref.a : part.ref.b) + delta;
     idx = Math.max(0, Math.min(sys.staves.length - 1, idx));
     setReference(part, sys, idx, true);
+    refChanged(part);
   }
   function extendRef(part, dir) {
     const sys = docSystems().find((s) => s.key === part.ref.key);
@@ -4155,13 +4232,14 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
     else if (dir < 0 && r.a > 0) r.a--;
     else return;
     propagate(part);
+    refChanged(part);
   }
 
   // regions & strips
   const regionCache = new Map();
-  function regionFor(part, sys, sel) {
+  function regionFor(part, sys, sel, hk) {
     const o = part.opts;
-    const hk = headerKinds(part);
+    if (hk === undefined) hk = headerKinds(part);
     const key = [sys.key, sel.a, sel.b, hk ? hk.join('+') : '-', o.label, o.up, o.down].join('|');
     let r = regionCache.get(key);
     if (!r) {
@@ -4173,19 +4251,55 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
     }
     return r;
   }
+  // the staff ranges a part takes from one system (its own and the added ones), top to bottom;
+  // touching ranges are cut out as one piece, the others are stacked
+  function partRegions(part, sys) {
+    const rs = [];
+    for (const q of selectors(part)) {
+      const x = q.sel[sys.key];
+      if (isChosen(x)) rs.push({ a: x.a, b: x.b });
+    }
+    rs.sort((p, q) => p.a - q.a);
+    const groups = [];
+    for (const r of rs) {
+      const last = groups[groups.length - 1];
+      if (last && r.a <= last.b + 1) last.b = Math.max(last.b, r.b);
+      else groups.push({ a: r.a, b: r.b });
+    }
+    const vocalTop = groups.length && groups[0].a === 0 && (part.extra || []).some((x) => x.ref);
+    const hk = headerKinds(part, vocalTop);
+    return groups.map((g, i) => ({ sel: g, hk: i ? null : hk, region: regionFor(part, sys, g, i ? null : hk) }));
+  }
+  function stackStrips(list, sp) {
+    const minX = Math.min(...list.map((q) => q.region.x0));
+    const offs = list.map((q) => Math.round(q.region.x0 - minX));
+    const W = Math.max(...list.map((q, i) => offs[i] + q.ex.strip.w));
+    const gap = Math.round(0.8 * sp);
+    const H = list.reduce((a, q) => a + q.ex.strip.h, 0) + gap * (list.length - 1);
+    const data = new Uint8Array(W * H).fill(255);
+    let y = 0;
+    list.forEach((q, i) => {
+      const st = q.ex.strip;
+      for (let r = 0; r < st.h; r++) data.set(st.data.subarray(r * st.w, (r + 1) * st.w), (y + r) * W + offs[i]);
+      y += st.h + gap;
+    });
+    const h0 = list[0].ex.header;
+    const header = h0 ? Object.assign({}, h0, { offsetX: (h0.offsetX || 0) - offs[0] }) : null;
+    return { strip: { w: W, h: H, data }, header };
+  }
   function collectStrips(part) {
     const items = [];
     for (const s of docSystems()) {
-      const sel = part.sel[s.key];
-      if (!isChosen(sel)) continue;
+      const regs = partRegions(part, s);
+      if (!regs.length) continue;
       const pr = s.page.proc;
-      const region = regionFor(part, s, sel);
-      const ex = E.extractRegion(pr.gray, pr.w, pr.h, region);
+      const list = regs.map((q) => ({ region: q.region, ex: E.extractRegion(pr.gray, pr.w, pr.h, q.region) }));
+      const ex = list.length === 1 ? list[0].ex : stackStrips(list, pr.det.metrics.space);
       const mm = s.page.mmPerPx;
       const hh = ex.header ? ex.header.h : 0;
       const off = ex.header ? (ex.header.offsetX || 0) : 0;
       items.push({
-        key: s.key + '|' + part.id + '|' + [sel.a, sel.b, (headerKinds(part) || []).join('+'), part.opts.label, part.opts.up, part.opts.down].join(','),
+        key: s.key + '|' + part.id + '|' + [regs.map((q) => q.sel.a + '-' + q.sel.b).join('+'), (regs[0].hk || []).join('+'), part.opts.label, part.opts.up, part.opts.down].join(','),
         strip: ex.strip, header: ex.header, level: pr.bwLevel,
         wmm: ex.strip.w * mm, hmm: (ex.strip.h + hh) * mm, offmm: off * mm, mmPerPx: mm, fracW: ex.strip.w / pr.w, pageKey: s.page.id,
         spmm: (pr.det.stdSpace || pr.det.metrics.space || 0) * mm,
@@ -4704,24 +4818,26 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
     const j = i + d;
     if (j < 0 || j >= state.pages.length) return;
     const t = state.pages[i]; state.pages[i] = state.pages[j]; state.pages[j] = t;
-    for (const part of state.parts) if (part.ref) propagate(part);
+    propagateAll();
     render();
   }
   function removePage(i) {
     const [pg] = state.pages.splice(i, 1);
     releasePage(pg);
     for (const part of state.parts) {
-      for (const k of Object.keys(part.sel)) if (k.startsWith(pg.id + ':')) delete part.sel[k];
-      if (part.ref && part.ref.key.startsWith(pg.id + ':')) { part.ref = null; part.sel = {}; }
-      else if (part.ref) propagate(part);
+      for (const q of [part, ...(part.extra || [])]) {
+        for (const k of Object.keys(q.sel)) if (k.startsWith(pg.id + ':')) delete q.sel[k];
+        if (q.ref && q.ref.key.startsWith(pg.id + ':')) { q.ref = null; q.sel = {}; }
+      }
     }
+    propagateAll();
     if (!state.pages.length) state.sample = false;
     render();
   }
   function sortByName() {
     const coll = new Intl.Collator('ja', { numeric: true });
     state.pages.sort((a, b) => coll.compare(a.name, b.name));
-    for (const part of state.parts) if (part.ref) propagate(part);
+    propagateAll();
     render();
   }
 
@@ -4844,18 +4960,57 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
           el('button', { class: 'btn small', onclick: () => { shiftRef(part, -1); render(); } }, '▲ 1つ上へ'),
           el('button', { class: 'btn small', onclick: () => { shiftRef(part, 1); render(); } }, '▼ 1つ下へ'),
           el('button', { class: 'btn small', onclick: () => { extendRef(part, 1); render(); } }, '下の譜表も含める')),
-        el('button', { class: 'btn ghost small', style: 'align-self:flex-start', onclick: () => { part.ref = null; part.sel = {}; render(); } }, '選び直す')));
+        el('button', { class: 'btn ghost small', style: 'align-self:flex-start', onclick: () => { part.ref = null; part.sel = {}; part.extra = []; state.adding = null; render(); } }, '選び直す')));
+    }
+    // staves cut out together with this part (vocal line for a singing player, a second guitar ...)
+    {
+      const kids = [el('h2', { class: 'eyebrow' }, '一緒に切り抜く譜表')];
+      if (partKind(part) !== 'vocal') {
+        const onTop = part.ref && part.ref.a === 0;
+        kids.push(toggle('ボーカルの段も入れる（弾き語り・コーラス用）', part.withVocal && !onTop,
+          (v) => { part.withVocal = v; refChanged(part); render(); }, 'opt-vocal'));
+        if (part.withVocal && onTop) kids.push(el('p', { class: 'hint' }, 'いちばん上の譜表はすでに選ばれています。'));
+      }
+      for (const x of part.extra.filter((q) => q.ref && !q.vocal)) {
+        const xs = systems.find((q) => q.key === x.ref.key);
+        kids.push(el('div', { class: 'row spread' },
+          el('span', null, xs ? `${xs.pageNo}ページ目・${xs.si + 1}段目の${staffName(xs, x.ref.a)}` : '追加した譜表'),
+          el('button', { class: 'btn ghost small', onclick: () => { removeExtra(part, x); render(); } }, '外す')));
+      }
+      if (part.ref) {
+        kids.push(state.adding === part.id
+          ? el('div', { class: 'row' },
+            el('span', { class: 'hint', style: 'color:var(--warn)' }, '楽譜の上で、追加する譜表をタップしてください。'),
+            el('button', { class: 'btn ghost small', onclick: () => { state.adding = null; render(); } }, 'やめる'))
+          : el('button', { class: 'btn small', style: 'align-self:flex-start', id: 'add-staff', onclick: () => {
+            state.adding = part.id;
+            render();
+            if (isTouch) root.mat.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          } }, '＋ ほかの譜表も追加'));
+      }
+      kids.push(el('p', { class: 'hint' }, 'ギターを弾きながら歌う場合などに使います。同じ段の中で上から順に並べて出力します。'));
+      p.append(el('div', { class: 'sect' }, kids));
     }
     // options
     const o = part.opts;
-    const changeOpt = (k, v) => { o[k] = v; if (k === 'tab' && part.ref) { const rs = systems.find((s) => s.key === part.ref.key); if (rs) setReference(part, rs, part.ref.core != null ? part.ref.core : part.ref.a, true); } render(); };
+    const changeOpt = (k, v) => {
+      o[k] = v;
+      if (k === 'tab' && part.ref) {
+        for (const q of selectors(part)) {
+          const rs = systems.find((s) => s.key === q.ref.key);
+          if (rs) setReference(q, rs, q.ref.core != null ? q.ref.core : q.ref.a, true);
+        }
+        refChanged(part);
+      }
+      render();
+    };
     p.append(el('div', { class: 'sect' },
       el('h2', { class: 'eyebrow' }, '切り抜き方'),
       toggle('TAB譜も一緒に抜き出す', o.tab, (v) => changeOpt('tab', v), 'opt-tab'),
       el('div', { class: 'field' }, el('span', null, '楽器（段の上の記号の選び方）'),
         el('div', { class: 'seg', role: 'group', 'aria-label': '楽器' },
           KINDS.map(([k, label]) => el('button', { 'aria-pressed': String(partKind(part) === k),
-            onclick: () => { part.kind = k; o.chords = null; render(); } }, label)))),
+            onclick: () => { part.kind = k; o.chords = null; refChanged(part); render(); } }, label)))),
       toggle('練習番号・テンポ・反復記号を付ける', o.header, (v) => changeOpt('header', v), 'opt-header'),
       toggle('コードネームを付ける', chordsOn(part), (v) => changeOpt('chords', v), 'opt-chords'),
       el('p', { class: 'hint' }, partKind(part) === 'drums'
@@ -4882,6 +5037,8 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
         if (isChosen(sel)) what = staffName(s, sel.a);
         else if (sel.mode === 'none') what = 'この段にはパートが見つかりません';
         else if (sel.mode === 'off') what = '出力しません';
+        const added = part.extra.filter((x) => x.ref && isChosen(x.sel[s.key]));
+        if (added.length) what += ' ＋' + added.map((x) => (x.vocal ? 'ボーカル' : staffName(s, x.sel[s.key].a).replace(/（.*$/, ''))).join('・');
         const act = sel.mode === 'off'
           ? el('button', { class: 'btn ghost small', onclick: () => { part.sel[s.key] = sel.prev || { mode: 'none', conf: 1 }; render(); } }, '戻す')
           : isChosen(sel) && sel.mode !== 'ref'
@@ -5149,7 +5306,7 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
     m.textContent = '';
     const part = activePart();
     m.append(el('div', { class: 'matbar' },
-      el('span', { class: 'label' }, part.ref ? `「${part.name}」を選択中` : `「${part.name}」の譜表をタップ`, ' ', el('span', { class: 'num' }, `${systems.length}段`)),
+      el('span', { class: 'label' }, state.adding === part.id ? `「${part.name}」に追加する譜表をタップ` : part.ref ? `「${part.name}」を選択中` : `「${part.name}」の譜表をタップ`, ' ', el('span', { class: 'num' }, `${systems.length}段`)),
       el('div', { class: 'row' },
         el('button', { class: 'btn small jump', onclick: () => root.panel.scrollIntoView({ behavior: 'smooth' }) }, '設定・一覧 ↓'),
         matZoomBar('', () => state.zoom, (z) => { state.zoom = z; render(); }))));
@@ -5213,10 +5370,9 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
       const by0 = (first.top(first.xL) - 2) * k, by1 = (last.bottom(last.xL) + 2) * k;
       g.fillStyle = 'rgba(29,90,77,0.8)';
       g.fillRect(bx - 2 * dpr, by0, 3 * dpr, by1 - by0);
-      // selection
-      if (isChosen(sel)) {
-        const r = regionFor(part, s, sel);
-        const flag = needsCheck(sel);
+      // selection (the part's own staves and the ones added to it)
+      const flag = needsCheck(sel);
+      for (const { region: r } of partRegions(part, s)) {
         const path = (topF, off1, botF, off2) => {
           g.beginPath();
           const N = 16;
