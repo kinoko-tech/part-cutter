@@ -227,6 +227,7 @@ p { margin: 0; }
 .title { font-size: 20px; font-weight: 700; line-height: 1.35; }
 .lead { color: var(--ink-2); max-width: 36em; }
 .hint { font-size: 12.5px; color: var(--ink-2); }
+.hint.warn { color: var(--warn); }
 .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .row.spread { justify-content: space-between; }
 .stack { display: flex; flex-direction: column; gap: 8px; }
@@ -417,6 +418,9 @@ a.btn { text-decoration: none; }
   max-width: 520px; margin: 40px auto;
 }
 .empty h3 { font-size: 17px; color: #fff; }
+/* on the dark cutting mat the main button is a highlighter mark */
+.empty .btn.primary { background: var(--marker); border-color: var(--marker); color: #2a1d00; }
+.empty .btn.primary:hover { background: #e3a820; border-color: #e3a820; }
 .editor { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 24px; align-items: start; }
 @media (max-width: 1100px) { .editor { grid-template-columns: 1fr; } }
 .a4 { aspect-ratio: 210 / 297; }
@@ -3746,15 +3750,18 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
   const safeName = (s) => (s || '').replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '_').replace(/\s+/g, ' ').trim().slice(0, 80) || 'part';
 
   // --------------------------------------------------------------- state
+  const savedLayout = store('layout') || {};
+  if (savedLayout.v !== 2) delete savedLayout.gap; // the default spacing became tighter
   const prefs = Object.assign({
-    marginX: 10, marginTop: 12, marginBottom: 12, gap: 4, scaleMode: 'fit', scale: 100,
+    marginX: 10, marginTop: 12, marginBottom: 12, gap: 2, scaleMode: 'fit', scale: 100,
     justify: false, bw: false, pageNo: true, heading: true,
-  }, store('layout') || {});
+  }, savedLayout, { v: 2, pages: 0 }); // pages: fit each part on this many pages (0 = automatic)
+  const MIN_FIT = 0.5; // smallest size factor used to squeeze a part onto fewer pages
   const partDefaults = Object.assign({ tab: true, header: true, label: false, up: 0, down: 0 }, store('partOpts') || {});
 
   let uid = 1;
   const state = {
-    step: 'parts',
+    step: 'load',
     pages: [],
     parts: [],
     activePart: null,
@@ -3859,6 +3866,7 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
     if (added && !state.title) state.title = guessTitle(files[0].name);
     if (added) {
       state.step = 'load';
+      prefs.pages = 0; // a page count belongs to one score
       render();
       runQueue();
     }
@@ -4187,9 +4195,10 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
   }
 
   // -------------------------------------------------------------- layout
-  function layout(groups) {
-    // groups: [{part, items}] ; returns pages [{items:[{it,x,y,w,h}], part, first}]
-    const P = prefs;
+  function layout(groups, over) {
+    // groups: [{part, items}]; over: prefs to override (e.g. {pages: 0})
+    // returns { pages: [{items:[{it,x,y,w,h}], part, firstOfPart}], scale, size, tooSmall }
+    const P = Object.assign({}, prefs, over || {});
     const pageW = 210, pageH = 297;
     const contentW = pageW - 2 * P.marginX;
     const headRoom = P.heading ? 9 : 0;
@@ -4251,29 +4260,56 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
     const pages = [];
     const bottom = pageH - P.marginBottom - (P.pageNo ? 5 : 0);
     const top = P.marginTop + headRoom;
+    // width of a full-length strip at the common scale (smaller strips are centred on it)
+    const fullWidth = fit ? contentW - inset : Math.min(contentW - inset, maxW * scale);
+    const multi = groups.length > 1;
     const paginate = (g, gapK, sizeK) => {
       const out = [];
       let page = null, y = 0;
       const open = () => {
-        page = { items: [], part: g.part, firstOfPart: !out.length };
+        page = { items: [], part: g.part, firstOfPart: !out.length, multi };
         out.push(page);
         y = top;
       };
       open();
+      const dx = sizeK < 1 ? (fullWidth * (1 - sizeK)) / 2 : 0;
       for (const it of g.items) {
         const k0 = it.norm * scale * it.u * sizeK;
         let w = it.wmm * k0 * it.sx, h = it.hmm * k0;
         if (h > bottom - top) { const k = (bottom - top) / h; w *= k; h *= k; }
         if (page.items.length && y + h > bottom) open();
-        page.items.push({ it, x: P.marginX + inset, y, w, h });
+        page.items.push({ it, x: P.marginX + inset + dx, y, w, h });
         y += h + P.gap * gapK;
       }
       return out;
     };
+    const target = Math.max(0, Math.round(P.pages || 0));
+    let size = 1, tooSmall = false;
     for (const g of groups) {
       let mine = paginate(g, 1, 1);
-      // avoid a last page holding only one or two strips: tighten the gaps, then shrink a little
-      if (mine.length > 1 && mine[mine.length - 1].items.length <= 2) {
+      if (target && mine.length > target) {
+        // a page count was chosen: close up the gaps first, then make the strips smaller
+        let best = null;
+        for (const gk of [0.5, 0.25]) {
+          const alt = paginate(g, gk, 1);
+          if (alt.length <= target) { best = alt; break; }
+        }
+        if (!best) {
+          const gk = 0.25;
+          let lo = MIN_FIT, hi = 1;
+          if (paginate(g, gk, lo).length > target) tooSmall = true;
+          else {
+            for (let i = 0; i < 12; i++) {
+              const mid = (lo + hi) / 2;
+              if (paginate(g, gk, mid).length <= target) lo = mid; else hi = mid;
+            }
+          }
+          best = paginate(g, gk, lo);
+          size = Math.min(size, lo);
+        }
+        mine = best;
+      } else if (!target && mine.length > 1 && mine[mine.length - 1].items.length <= 2) {
+        // avoid a last page holding only one or two strips: tighten the gaps, then shrink a little
         for (const [gk, sk] of [[0.6, 1], [0.35, 1], [0.35, 0.97], [0.35, 0.94]]) {
           const alt = paginate(g, gk, sk);
           if (alt.length < mine.length) { mine = alt; break; }
@@ -4295,7 +4331,15 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
       const mine = pages.filter((p) => p.part === g.part);
       mine.forEach((p, i) => { p.partPageNo = i; p.partPageCount = mine.length; });
     }
-    return { pages, scale };
+    return { pages, scale, size, tooSmall };
+  }
+  // text at the top right: the part on its first page, "曲名（2/3）" on the pages after it
+  function headingText(pg, idx, count) {
+    if (pg.firstOfPart) return pg.part.name;
+    const n = (pg.partPageNo != null ? pg.partPageNo : idx) + 1;
+    const total = pg.partPageCount != null ? pg.partPageCount : count;
+    const name = state.title ? state.title + (pg.multi ? ' ' + pg.part.name : '') : pg.part.name;
+    return `${name}（${n}/${total}）`;
   }
 
   const bitmapCache = new Map();
@@ -4345,8 +4389,8 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
       }
       g.font = `600 ${3.4 * pxmm}px ${font}`;
       g.textAlign = 'right';
-      const tag = pg.part.name + (pg.firstOfPart ? '' : '（つづき）');
-      g.fillText(tag, (210 - P.marginX) * pxmm, base);
+      const room = pg.firstOfPart && state.title ? 38 : 210 - 2 * P.marginX;
+      g.fillText(headingText(pg, idx, count), (210 - P.marginX) * pxmm, base, room * pxmm);
       g.strokeStyle = '#999';
       g.lineWidth = Math.max(1, 0.2 * pxmm);
       g.beginPath();
@@ -4861,7 +4905,14 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
   function panelOutput(p) {
     const part = activePart();
     const groups = outputGroups();
-    const { pages } = groups.length ? layout(groups) : { pages: [] };
+    const lay = groups.length ? layout(groups) : { pages: [], size: 1, tooSmall: false };
+    const { pages } = lay;
+    // page count without squeezing (per part), for the page-count choices
+    let autoPages = 0;
+    if (groups.length) {
+      const auto = prefs.pages ? layout(groups, { pages: 0 }).pages : pages;
+      for (const g of groups) autoPages = Math.max(autoPages, auto.filter((x) => x.part === g.part).length);
+    }
     const nStrips = groups.reduce((a, g) => a + g.items.length, 0);
     p.append(el('div', { class: 'sect' },
       el('div', { class: 'eyebrow' }, 'STEP 4'),
@@ -4885,16 +4936,33 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
     const setP = (k, v) => { P[k] = v; render(); };
     p.append(el('div', { class: 'sect' },
       el('label', { class: 'field' }, el('span', null, '出力するパート'), partSel),
-      el('label', { class: 'field' }, el('span', null, '曲名（1ページ目に印字）'), titleInput)));
+      el('label', { class: 'field' }, el('span', null, '曲名（ページ上部に印字）'), titleInput)));
+    // page count: automatic, or squeeze onto fewer pages
+    const target = P.pages && P.pages < autoPages ? P.pages : 0;
+    const pageOpts = [el('option', { value: '0', selected: !target }, autoPages ? `自動（${autoPages}ページ）` : '自動')];
+    for (let n = autoPages - 1; n >= 1; n--) pageOpts.push(el('option', { value: String(n), selected: target === n }, `${n}ページに収める`));
+    const pageSel = el('select', { class: 'select', id: 'out-pages', disabled: autoPages < 2,
+      onchange: (e) => setP('pages', Number(e.target.value) || 0) }, pageOpts);
+    let fitNote = null;
+    if (target && lay.tooSmall) {
+      fitNote = el('p', { class: 'hint warn' }, `${target}ページには収まりません（これ以上小さくすると読めなくなるため、${Math.round(MIN_FIT * 100)}%で止めています）。`);
+    } else if (target && lay.size < 0.995) {
+      fitNote = el('p', { class: 'hint' + (lay.size < 0.75 ? ' warn' : '') },
+        `段の間隔を詰め、楽譜を${Math.round(lay.size * 100)}%に縮小して${target}ページに収めています。` + (lay.size < 0.75 ? '文字がかなり小さくなります。' : ''));
+    } else if (target) {
+      fitNote = el('p', { class: 'hint' }, `段の間隔を詰めて${target}ページに収めています。`);
+    }
     p.append(el('div', { class: 'sect' },
       el('h2', { class: 'eyebrow' }, '並べ方'),
+      el('label', { class: 'field' }, el('span', null, 'ページ数' + (groups.length > 1 ? '（パートごと）' : '')), pageSel),
+      fitNote,
       el('div', { class: 'seg', role: 'group', 'aria-label': '大きさ' },
         el('button', { 'aria-pressed': String(P.scaleMode === 'fit'), onclick: () => setP('scaleMode', 'fit') }, '横幅いっぱい'),
         el('button', { 'aria-pressed': String(P.scaleMode === 'orig'), onclick: () => setP('scaleMode', 'orig') }, '原寸基準')),
       P.scaleMode === 'orig' ? stepper('倍率', P.scale, P.scale + '%', (v) => setP('scale', v), 5, 50, 200) : null,
       stepper('左右の余白', P.marginX, P.marginX + ' mm', (v) => setP('marginX', v), 1, 3, 30),
       stepper('上下の余白', P.marginTop, P.marginTop + ' mm', (v) => { P.marginBottom = v; setP('marginTop', v); }, 1, 3, 30),
-      stepper('段の間隔', P.gap, P.gap + ' mm', (v) => setP('gap', v), 1, 0, 30),
+      stepper('段の間隔', P.gap, P.gap + ' mm', (v) => setP('gap', v), 0.5, 0, 20),
       toggle('ページ内で段を均等に配置', P.justify, (v) => setP('justify', v), 'opt-justify'),
       toggle('白黒をくっきりさせる', P.bw, (v) => setP('bw', v), 'opt-bw'),
       toggle('曲名・パート名を印字', P.heading, (v) => setP('heading', v), 'opt-heading'),
@@ -5270,6 +5338,7 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
     const srcs = window.BSX_SAMPLE || [];
     if (!srcs.length) return;
     clearSample();
+    prefs.pages = 0;
     state.sample = true;
     state.title = 'Summer Test Drive（サンプル）';
     for (let i = 0; i < srcs.length; i++) {
@@ -5314,9 +5383,8 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
       clearTimeout(rt);
       rt = setTimeout(() => { if (state.step === 'parts') renderMat(); }, 150);
     });
-    window.PartCutter = { state, addFiles, go, loadSample, docSystems, layout, outputGroups, drawOutPage, tapStaff, render, exportPdf, sourceCanvas };
-    render();
-    loadSample();
+    window.PartCutter = { state, prefs, addFiles, go, loadSample, docSystems, layout, outputGroups, drawOutPage, headingText, tapStaff, render, exportPdf, sourceCanvas };
+    render(); // starts empty; the sample is one tap away on the empty mat
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
