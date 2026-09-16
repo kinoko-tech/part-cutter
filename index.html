@@ -358,6 +358,7 @@ a.btn { text-decoration: none; }
 .tab[aria-pressed="false"] .chk { width: 0; margin-right: -6px; }
 .tab:disabled { opacity: 0.5; cursor: default; }
 .tab.add { border-style: dashed; }
+.tab .x { margin-left: 2px; font-size: 15px; line-height: 1; color: var(--ink-2); }
 
 .pagelist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .pagelist li {
@@ -3323,6 +3324,8 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
     for (const c of comps) {
       if (c.kind === 'line') c.kind = 'staff';
       if (!c.kind || c.kind === 'tempoNote') c.kind = 'text';
+      // bits of the instrument name and the brace in the left margin
+      if (c.maxX < startX - 0.3 * sp && (c.kind === 'staff' || c.kind === 'text' || c.kind === 'chord' || c.kind === 'lyric')) c.kind = 'page';
       items.push(c);
     }
     return items;
@@ -3830,10 +3833,19 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
     if (!activePart().on) state.activePart = state.parts.filter((p) => p.on).pop().id;
   }
   const chosenParts = () => { fixChosen(); return state.parts.filter((p) => p.on); };
-  // chips toggle; a part that is switched on becomes the one being edited
+  // step 3 chips: tap to add a part (and edit it), tap a chosen part to edit it,
+  // tap the part being edited once more to take it out
   function tapPartChip(pt) {
     if (!pt.on) { pt.on = true; state.activePart = pt.id; return; }
-    if (state.parts.filter((p) => p.on).length <= 1) { state.activePart = pt.id; return; }
+    if (pt.id !== activePart().id) { state.activePart = pt.id; return; }
+    if (state.parts.filter((p) => p.on).length <= 1) return;
+    pt.on = false;
+    fixChosen();
+  }
+  // step 4 chips: plain on/off
+  function tapOutputChip(pt) {
+    if (!pt.on) { pt.on = true; return; }
+    if (state.parts.filter((p) => p.on).length <= 1) return;
     pt.on = false;
     fixChosen();
   }
@@ -4892,11 +4904,16 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
     // part chips: several can be chosen (e.g. guitar + vocal); the one with the dot is being edited
     const chosen = chosenParts();
     const tabs = el('div', { class: 'tabs', role: 'group', 'aria-label': 'パート（複数選べます）' });
-    state.parts.forEach((pt) => tabs.append(el('button', {
-      class: 'tab', 'aria-pressed': String(pt.on), 'data-part': pt.id,
-      title: pt.on ? (chosen.length > 1 ? 'もう一度タップで選択を外す' : '選択中') : 'タップで追加',
-      onclick: () => { tapPartChip(pt); render(); },
-    }, pt.id === part.id ? el('span', { class: 'sw-dot', 'aria-hidden': 'true' }) : el('span', { class: 'chk', 'aria-hidden': 'true' }, pt.on ? '✓' : ''), pt.name)));
+    state.parts.forEach((pt) => {
+      const editing = pt.id === part.id;
+      const removable = editing && chosen.length > 1;
+      tabs.append(el('button', {
+        class: 'tab', 'aria-pressed': String(pt.on), 'data-part': pt.id,
+        'aria-label': pt.name + (editing ? '（設定中' + (removable ? '・タップで選択から外す）' : '）') : pt.on ? '（選択中・タップで設定）' : '（タップで追加）'),
+        onclick: () => { tapPartChip(pt); render(); },
+      }, editing ? el('span', { class: 'sw-dot', 'aria-hidden': 'true' }) : el('span', { class: 'chk', 'aria-hidden': 'true' }, pt.on ? '✓' : ''),
+      pt.name, removable ? el('span', { class: 'x', 'aria-hidden': 'true' }, '×') : null));
+    });
     tabs.append(el('button', { class: 'tab add', id: 'add-part', onclick: () => {
       const names = ['ベース', 'ギター', 'ボーカル', 'キーボード'];
       const used = new Set(state.parts.map((x) => x.name));
@@ -4912,11 +4929,8 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
       onchange: (e) => { part.name = e.target.value.trim() || part.name; render(); } });
     p.append(el('div', { class: 'sect' }, tabs,
       el('p', { class: 'hint' }, chosen.length > 1
-        ? `「${outputName(chosen)}」を同じ段ごとにまとめて出力します。選択中のパートをタップすると外れます。`
-        : 'パートをタップすると複数選べます（ギター＋ボーカルなど）。選んだパートは段ごとにまとめて出力します。'),
-      chosen.length > 1 ? el('div', { class: 'field' }, el('span', null, '設定・譜表を選ぶパート'),
-        el('div', { class: 'seg', role: 'group', 'aria-label': '設定するパート' },
-          chosen.map((pt) => el('button', { 'aria-pressed': String(pt.id === part.id), onclick: () => { state.activePart = pt.id; render(); } }, pt.name)))) : null,
+        ? `「${outputName(chosen)}」を段ごとにまとめて出力します。●が付いたパートの譜表・設定を変更中です。✓のパートをタップすると切り替わり、●のパートをもう一度タップすると選択から外れます（×）。`
+        : 'ほかのパートをタップすると、複数のパートを選べます（ギター＋ボーカルなど）。選んだパートは段ごとにまとめて出力します。'),
       el('label', { class: 'field' }, el('span', null, 'パート名（出力の右上に印字）'), nameInput),
       state.parts.length > 1 ? el('button', { class: 'btn ghost small', style: 'align-self:flex-start', onclick: () => {
         state.parts = state.parts.filter((x) => x.id !== part.id);
@@ -5041,7 +5055,7 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
     const chips = el('div', { class: 'tabs', role: 'group', 'aria-label': '出力するパート（複数選べます）', id: 'out-parts' },
       state.parts.map((pt) => el('button', {
         class: 'tab', 'aria-pressed': String(pt.on), 'data-part': pt.id, disabled: !pt.ref && !pt.on,
-        onclick: () => { tapPartChip(pt); render(); },
+        onclick: () => { tapOutputChip(pt); render(); },
       }, el('span', { class: 'chk', 'aria-hidden': 'true' }, pt.on ? '✓' : ''), pt.name + (pt.ref ? '' : '（未選択）'))));
     const partSel = chosen.length > 1 ? el('select', { class: 'select', id: 'out-part', onchange: (e) => { state.outPart = e.target.value; render(); } },
       el('option', { value: 'combined', selected: state.outPart !== 'separate' }, `${outputName(chosen)}を段ごとにまとめる`),
@@ -5417,17 +5431,22 @@ window.BSX_SAMPLE = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABNgAAAbaAgMA
     const y = ((e.clientY - r.top) / r.height) * pr.h;
     const sp = pr.det.metrics.space;
     const cssTol = (18 / r.width) * pr.w;
-    let best = null, bd = Infinity;
+    let best = null, bd = Infinity, inside = false;
     for (const s of docSystems().filter((q) => q.page === pg)) {
+      const first = s.staves[0], last = s.staves[s.staves.length - 1];
+      const xs = Math.max(first.xL, Math.min(first.xR, x));
+      const inSys = x >= first.xL - 3 * sp && x <= first.xR + 2 * sp && y >= first.top(xs) - 2 * sp && y <= last.bottom(xs) + 4 * sp;
       s.staves.forEach((st, idx) => {
         if (x < st.xL - 3 * sp || x > st.xR + 2 * sp) return;
         const xx = Math.max(st.xL, Math.min(st.xR, x));
         const t = st.top(xx), b = st.bottom(xx);
-        const d = y < t ? t - y : y > b ? y - b : 0;
-        if (d < bd) { bd = d; best = { s, idx }; }
+        // what sits right below a staff (lyrics) belongs to it rather than to the staff further down
+        const d = y < t ? (t - y) * 1.5 : y > b ? y - b : 0;
+        if (d < bd) { bd = d; best = { s, idx }; inside = inSys; }
       });
     }
-    if (!best || bd > Math.max(2.2 * sp, cssTol)) return;
+    // anywhere inside a system picks one of its staves; outside, only close taps count
+    if (!best || (!inside && bd > Math.max(2.2 * sp, cssTol))) return;
     const part = activePart();
     tapStaff(part, best.s, best.idx);
     render();
